@@ -1,0 +1,194 @@
+---
+title: "Baseline Data Processing"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+# setup
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+```{r}
+data_dir <- here("data/conversation/raw/baseline")
+save_dir <- here("data/conversation/processed/baseline")
+```
+
+```{r}
+# import raw data from non-pilot baseline version
+participant_df_raw <- read_csv(file.path(
+        data_dir,"baseline_full_participant_data_raw.csv"))
+chat_messages_df <- read_csv(file.path(
+        data_dir, "baseline_full_chat_messages_raw.csv"))
+```
+
+# data processing
+exclusion criteria:
+1) matched w/ another participant
+2) belonged to dyad where both participants passed attention checks
+3) belonged to dyad where both members of group reported no technical issues with sliders
+4) belong to dyad where they didn't leave chat early
+5) belonged to dyad where both members of group answered all sliders
+6) finished experiment
+
+```{r}
+# matched
+matched_df <- participant_df_raw %>%
+        filter(groupId != "")
+
+# attn check errors
+attn_check_df <- matched_df %>%
+        filter(category == 'ATTENTION CHECK') %>%
+        mutate(attn_error = abs(response - requested_response))
+
+# find groups with attn check failures
+attn_fail <- attn_check_df %>%
+        group_by(groupId) %>%
+        summarise(max_err = max(attn_error)) %>%
+        filter(max_err >= 10)
+
+# remove groups wherein either participant failed attn checks
+passed_attn_checks_df <- matched_df %>%
+        filter(!(groupId %in% attn_fail$groupId))
+
+# remove groups with participants that reported slider technical issues
+slider_issues = c('9631',
+                  'de6',
+                  '4393',
+                  'aaac',
+                  'd32c',
+                  '5272')
+
+slider_issues_groups <- passed_attn_checks_df %>% 
+        filter(prolificId %in% slider_issues) %>% 
+        distinct(groupId) %>% 
+        pull(groupId)
+
+no_slider_issues_df <- passed_attn_checks_df %>% 
+        filter(!groupId %in% slider_issues_groups)
+
+# remove groups with early exits from chat
+early_exit_threshold <- 9.5 # minutes
+
+message_duration_summary <- chat_messages_df %>% 
+  group_by(group_id) %>%  
+  summarize(chat_duration_mins = as.numeric(difftime(max(absolute_timestamp),
+                                                     min(start_time),
+                                                     units = "mins")),
+            .groups = 'drop')
+
+early_exit_removed_df <- no_slider_issues_df %>%
+        left_join(message_duration_summary, by = c("groupId" = "group_id")) %>% 
+        filter(earlyExit == FALSE | (earlyExit == TRUE & chat_duration_mins >= early_exit_threshold))
+
+# remove any groups who didn't have all sliders (due to technical issues)
+not_all_sliders_done <- early_exit_removed_df %>%
+        group_by(prolificId) %>%
+        count() %>% 
+        filter(n < 92)
+all_sliders_df <- early_exit_removed_df %>%
+        filter(!prolificId %in% not_all_sliders_done$prolificId)
+
+# remove ppl who didn't finish
+participant_df_clean <- all_sliders_df %>%
+        filter(currentState %in% c('experiment-complete', 'feedback-complete'))
+
+kable(
+        data.frame(
+                n_raw = length(unique(participant_df_raw$prolificId)),
+                n_matched = length(unique(matched_df$prolificId)),
+                n_passed_attn_check = length(unique(passed_attn_checks_df$prolificId)),
+                n_no_slider_issues = length(unique(no_slider_issues_df$prolificId)),
+                n_finished_chat = length(unique(early_exit_removed_df$prolificId)),
+                n_all_sliders = length(unique(all_sliders_df$prolificId)),
+                n_finished = length(unique(participant_df_clean$prolificId)),
+                n_dyads = length(unique(participant_df_clean$groupId))),
+        col.names = c("Raw", "Matched", "Dyad Passed Attn Check",
+                      "No Slider Issues", "Finished Chat",
+                      "Answered All Sliders", "Finished Exp", "Dyads")
+)
+```
+
+```{r}
+# 250 participants were recruited (n_raw above this because of returns)
+num_recruited <- 250
+
+n_final <- length(unique(participant_df_clean$prolificId))
+n_dyads <- length(unique(participant_df_clean$groupId))
+
+num_excluded <- num_recruited - n_final
+
+paste("Number of participants fewer than number recruited on Prolific:", num_excluded)
+```
+
+
+export processed participant data
+
+```{r}
+write_csv(participant_df_clean,
+          file.path(save_dir, "baseline_full_participant_data_processed.csv"))
+```
+
+process chat data
+
+```{r}
+# using same exclusion criteria as outlined above
+chat_messages_df_processed <- chat_messages_df %>% 
+        filter(author %in% unique(participant_df_clean$prolificId))
+```
+
+export processed chat data
+
+```{r}
+write_csv(chat_messages_df_processed,
+          file.path(save_dir, "baseline_full_chat_messages_processed.csv"))
+```
+
+# demographics
+
+```{r}
+length(unique(participant_df_clean$prolificId))
+length(unique(participant_df_clean$groupId))
+```
+
+```{r}
+demographics_df <- participant_df_clean %>%
+        select(prolificId, gender, race, age) %>%
+        distinct(prolificId, .keep_all = TRUE)
+
+table(demographics_df$gender)
+table(demographics_df$race)
+summary(demographics_df$age)
+```
+# technical / feedback
+
+```{r}
+participant_df_clean %>%
+        filter(technical != "") %>%
+        distinct(prolificId, .keep_all = TRUE) %>%
+        mutate(pid_short = str_sub(prolificId, start = -4, end = -1)) %>%
+        select(pid_short, technical) %>%
+        kable(col.names = c("PID", "Technical Issues")) %>% 
+        column_spec(2, width = "15cm") %>% 
+        kable_styling()
+
+participant_df_clean %>%
+        filter(feedback != "") %>%
+        distinct(prolificId, .keep_all = TRUE) %>%
+        mutate(pid_short = str_sub(prolificId, start = -4, end = -1)) %>%
+        select(pid_short, feedback) %>%
+        kable(col.names = c("PID", "Feedback")) %>% 
+        column_spec(2, width = "15cm") %>% 
+        kable_styling()
+```
+

@@ -1,0 +1,128 @@
+---
+title: "Data Combining"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+# setup
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+DEFAULT_THEME <- theme_classic() +
+        theme(plot.title = element_text(hjust = 0.5))
+theme_set(DEFAULT_THEME)
+```
+
+set directories
+```{r}
+data_dir <- here("data")
+baseline_data_dir <- here(data_dir, "conversation", "processed", "baseline")
+question_prompting_data_dir <- here(data_dir, "conversation", "processed", "question_prompting")
+priors_data_dir <- here(data_dir, "priors", "processed")
+save_dir <- here(data_dir, "conversation", "processed", "combined")
+```
+
+import processed data
+```{r}
+# baseline
+baseline_participant_df <- read_csv(file.path(baseline_data_dir,
+                   "baseline_full_participant_data_processed.csv"))
+
+baseline_chat_df <- read_csv(file.path(baseline_data_dir,
+                                       "baseline_full_chat_messages_processed.csv"))
+
+# question prompting
+question_prompting_participant_df <- read_csv(file.path(question_prompting_data_dir,
+                   "question_prompting_full_participant_data_processed.csv"),
+                   # remove index column
+                   col_select = -1)
+
+question_prompting_chat_df <- read_csv(file.path(question_prompting_data_dir,
+                        "question_prompting_full_chat_messages_processed.csv"),
+                        # remove index column
+                        col_select = -1)
+
+# priors
+priors_df <- read_csv(file.path(priors_data_dir, "scale_priors_processed.csv"),
+                      # remove index column
+                      col_select = -1)
+```
+# combine data
+prediction data
+```{r}
+# only include BFI scales
+priors_processed <- priors_df %>% filter(scaleCategory == 'personality')
+
+# calculate mean response given per each BFI scale in priors data
+priors_summary <- priors_processed %>%  
+  group_by(scaleID, scaleText) %>% 
+  summarize(
+    meanResponse = mean(priorResponse, na.rm = TRUE),
+    n = n(),
+    .groups = 'drop'
+  )
+
+# remove attention checks from baseline and question prompting data
+baseline_processed <- baseline_participant_df %>%  
+        filter(category != 'ATTENTION CHECK')
+question_prompting_processed <- question_prompting_participant_df %>%  
+        filter(category != 'ATTENTION CHECK')
+
+# combine baseline and question prompting rows
+combined_participant_df <- bind_rows(baseline_processed,
+                                 question_prompting_processed)
+
+# join this combined data frame with mean scale responses from priors data
+combined_predictions_df <- combined_participant_df %>% 
+        left_join(priors_summary %>%
+                          select(scaleText, meanResponse) %>%
+                          rename(prior_mean_response = meanResponse),
+                  by = c('scale_text' = 'scaleText'))
+```
+
+chat data
+```{r}
+combined_chat_df <- rbind(baseline_chat_df,
+                          question_prompting_chat_df)
+```
+
+# add derived column(s)
+## condition
+add condition to prediction data
+```{r}
+deep <- combined_chat_df %>% 
+        filter(condition == 'deep')
+
+shallow <- combined_chat_df %>% 
+        filter(condition == 'shallow')
+
+combined_predictions_df <- combined_predictions_df %>% 
+        mutate(condition = case_when(
+                prolificId %in% deep$author ~ 'deep',
+                prolificId %in% shallow$author ~ 'shallow',
+                .default = 'baseline'))
+```
+
+add 'baseline' to condition variable in chat messages data (instead of NA)
+```{r}
+combined_chat_df <- combined_chat_df %>% 
+        mutate(condition = ifelse(is.na(condition), 'baseline', condition))
+```
+
+
+# export combined data
+```{r}
+write_csv(combined_predictions_df, file.path(save_dir, 'predictions_combined.csv'))
+write_csv(combined_chat_df, file.path(save_dir, 'chat_messages_combined.csv'))
+```
+

@@ -1,0 +1,135 @@
+---
+title: "Scale Priors Data Processing"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+  word_document:
+    toc: true
+    toc_depth: '3'
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+```{r results = 'hide', message=FALSE}
+data_dir <- here("data/priors/raw")
+save_dir <- here("data/priors/processed")
+
+response_df_raw <- read_csv(file.path(data_dir,"scale_priors.csv"))
+survey_df_raw <- read_csv(file.path(data_dir, "survey_data.csv"))
+```
+
+# Process exclusions
+
+Participants from the scale data are excluded based on each of the following criteria:
+
+1) Failure to respond on all of the sliders
+
+2) Failure to pass attention checks
+
+```{r results = 'hide', message=FALSE}
+# (1) Identify participants who failed to respond on all sliders
+NUM_SLIDERS = 62
+incomplete_participants = response_df_raw |> 
+  group_by(prolificID) |>
+  summarize(responses = n(), .groups = 'drop') |>
+  filter(responses != NUM_SLIDERS) |> 
+  select(prolificID) |> 
+  distinct()
+# Filter response df to only include complete participants 
+response_df_complete = response_df_raw |> 
+  filter(!(prolificID %in% incomplete_participants$prolificID))
+# Align survey df to only include complete participants
+survey_df_complete = survey_df_raw |>
+  filter(!(prolificID %in% incomplete_participants$prolificID))
+
+# (2) Identify participants who failed attention checks
+ATTENTION_CHECK_ERROR_THRESHOLD = 10
+attn_check_failure = response_df_complete |> 
+  filter(comprehensionCheck == 1) |> 
+  mutate(attn_error = abs(priorResponse - comprehensionCheckRequestedResponse)) |>
+  group_by(prolificID) |> 
+  summarize(max_err = max(attn_error), .groups = 'drop') |>
+  filter(max_err > ATTENTION_CHECK_ERROR_THRESHOLD) |> 
+  select(prolificID) |> 
+  distinct()
+# Update participant data to remove these dyads
+attention_check_passing = response_df_complete |> 
+  filter(!prolificID %in% attn_check_failure$prolificID)
+# Align survey df to only include attention check passing participants
+survey_attention_check_passing = survey_df_complete |>
+  filter(!prolificID %in% attn_check_failure$prolificID)
+
+final_response_df = attention_check_passing
+final_survey_df = survey_attention_check_passing
+
+# Sanity checks
+n_distinct(response_df_raw$prolificID)
+n_distinct(survey_df_raw$prolificID)
+
+n_distinct(response_df_complete$prolificID)
+n_distinct(survey_df_complete$prolificID)
+
+n_distinct(attention_check_passing$prolificID)
+n_distinct(survey_attention_check_passing$prolificID)
+
+n_distinct(final_response_df$prolificID)
+n_distinct(final_survey_df$prolificID)
+```
+## Summary of exclusions
+```{r}
+kable(
+  data.frame(
+    n_raw = n_distinct(response_df_raw$prolificID),
+    n_complete = n_distinct(response_df_complete$prolificID),
+    n_attn_check_passed = n_distinct(attention_check_passing$prolificID),
+    n_final = n_distinct(final_response_df$prolificID)
+  ),
+  col.names = c("Raw", "Complete Responses", "Passed Attn Check", "Final")
+)
+```
+
+# Confirm no technical issues or problematic feedback
+
+```{r}
+final_survey_df |> 
+  filter(technicalIssues != "", !is.na(technicalIssues)) |>
+  distinct(prolificID, .keep_all = TRUE) |> 
+  mutate(pid_short = str_sub(prolificID, start = -4, end = -1)) |> 
+  select(pid_short, technicalIssues) |> 
+  kable(col.names = c("PID", "Technical Issues")) |> 
+  column_spec(2, width = "15cm") |> 
+  kable_styling()
+
+final_survey_df |> 
+  filter(feedback != "", !is.na(feedback)) |>
+  distinct(prolificID, .keep_all = TRUE) |> 
+  mutate(pid_short = str_sub(prolificID, start = -4, end = -1)) |> 
+  select(pid_short, feedback) |> 
+  kable(col.names = c("PID", "Feedback")) |> 
+  column_spec(2, width = "15cm") |> 
+  kable_styling()
+```
+
+# Write data to csv
+```{r}
+write.csv(
+  final_response_df,
+  file.path(save_dir, "scale_priors_processed.csv")
+)
+
+write.csv(
+  final_survey_df,
+  file.path(save_dir, "survey_data_processed.csv")
+)
+```

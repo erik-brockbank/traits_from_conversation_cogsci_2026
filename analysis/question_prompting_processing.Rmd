@@ -1,0 +1,240 @@
+---
+title: "Question Prompting Data Processing"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+# setup
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+```{r}
+data_dir <- here("data/conversation/raw/question_prompting")
+save_dir <- here("data/conversation/processed/question_prompting")
+```
+
+```{r results = 'hide', message=FALSE}
+participant_df_raw <- read_csv(file.path(data_dir,
+                                         "question_prompting_full_participant_data_raw.csv"))
+chat_messages_df <- read_csv(file.path(data_dir,
+                                       "question_prompting_full_chat_messages_raw.csv"))
+```
+
+
+# Process exclusions
+
+Participants from the raw data are excluded based on the following "waterfall" of criteria:
+
+1) matching with another participant
+
+2) both people in the dyad sent at least one message during the chat
+
+3) both people in the dyad finished the chat
+
+4) both people in the dyad passed all attention checks before and after the chat, and responded to all sliders
+
+5) both people in the dyad finished the experiment
+
+
+```{r results = 'hide', message=FALSE}
+
+# Processing: reformat `isQuestionPrompt` column
+chat_messages_df = chat_messages_df |> 
+  rowwise() |> 
+  mutate(
+    isQuestionPrompt = ifelse(is.na(isQuestionPrompt), FALSE, TRUE)
+  )
+
+
+# (1) Only keep participants who were matched in dyads
+matched_participant_data = participant_df_raw |> filter(groupId != "")
+# Align messages to matched participants 
+matched_participant_message_data = chat_messages_df |> filter(author %in% matched_participant_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(matched_participant_data$prolificId)
+n_distinct(matched_participant_message_data$author)
+# Why: the two fewer people in message data are people who never sent any messages. They get removed below. 
+setdiff(unique(matched_participant_data$prolificId), unique(matched_participant_message_data$author))
+matched_participant_message_data |> filter(author %in% setdiff(unique(matched_participant_data$prolificId), unique(matched_participant_message_data$author)))
+
+
+# (2) Remove any dyads from the above where at least one person didn't send any messages
+message_count_summary = matched_participant_message_data |> 
+  filter(isQuestionPrompt == FALSE) |>
+  count(author)
+no_message_dyads = matched_participant_data |> 
+  filter(!prolificId %in% message_count_summary$author) |> 
+  select(groupId) |> 
+  distinct(groupId)
+# Update participant data to remove these dyads
+messaged_participant_data = matched_participant_data |> 
+  filter(!groupId %in% no_message_dyads$groupId)
+# Align messages to remaining participants
+messaged_participant_message_data = matched_participant_message_data |>
+  filter(author %in% messaged_participant_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(messaged_participant_data$prolificId)
+n_distinct(messaged_participant_message_data$author)
+
+
+# (3) Remove any dyads from the above where at least one person didn't finish the chat
+EARLY_EXIT_CHAT_DURATION = 9.5 # minutes 
+message_duration_summary = messaged_participant_message_data |> 
+  group_by(group_id, author) |> 
+  summarize(chat_duration_mins = as.numeric(difftime(max(absolute_timestamp), min(start_time), units = "mins")), .groups = 'drop')
+
+# TODO: we have one participant who somehow was a member of *two* chats. They only show up once in participant data
+message_duration_summary |> filter(author == 'b6c5')
+messaged_participant_data |> filter(prolificId == 'b6c5') |> select(groupId) |> distinct()
+messaged_participant_message_data |> filter(author == 'b6c5') |> group_by(group_id)
+messaged_participant_message_data |> filter(group_id == 'jittery-copper') |> select(message_string)
+# Unclear what happened here, but easiest thing is to remove them
+messaged_participant_message_data = messaged_participant_message_data |> filter(!group_id %in% c('jittery-copper', 'invisible-maroon'))
+message_duration_summary = message_duration_summary |> filter(!group_id %in% c('jittery-copper', 'invisible-maroon'))
+messaged_participant_data = messaged_participant_data |> filter(!groupId %in% c('jittery-copper', 'invisible-maroon'))
+# sanity check: same number of people in both?
+n_distinct(messaged_participant_data$prolificId)
+n_distinct(messaged_participant_message_data$author)
+
+# Finally, filter out early exits
+chat_completion_data = messaged_participant_data |> 
+  left_join(message_duration_summary, by = c("groupId" = "group_id", "prolificId" = "author")) |>
+  filter(earlyExit == FALSE | (earlyExit == TRUE & chat_duration_mins >= EARLY_EXIT_CHAT_DURATION))
+chat_completion_message_data = messaged_participant_message_data |> 
+  filter(author %in% chat_completion_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(chat_completion_data$prolificId)
+n_distinct(chat_completion_message_data$author)
+
+
+# (4) Remove any dyads from the above where at least one person failed attention checks or did not complete all sliders
+ATTENTION_CHECK_ERROR_THRESHOLD = 10
+attn_check_failure = chat_completion_data |> 
+  filter(category == 'ATTENTION CHECK') |> 
+  mutate(attn_error = abs(response - requested_response)) |> 
+  group_by(groupId) |> 
+  summarize(max_err = max(attn_error), .groups = 'drop') |> 
+  filter(max_err > ATTENTION_CHECK_ERROR_THRESHOLD) |> 
+  select(groupId) |> 
+  distinct()
+# Update participant data to remove these dyads
+attention_check_data = chat_completion_data |> 
+  filter(!groupId %in% attn_check_failure$groupId)
+# Align messages to remaining participants
+attention_check_message_data = chat_completion_message_data |>
+  filter(author %in% attention_check_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(attention_check_data$prolificId)
+n_distinct(attention_check_message_data$author)
+
+# Remove dyads where either person didn't have full set of slider responses
+incomplete_sliders = attention_check_data |> 
+  group_by(prolificId) |> 
+  summarize(
+    responses = n(),
+    .groups = 'drop'
+  ) |> 
+  filter(responses != 92) |> 
+  select(prolificId) |> 
+  distinct()
+
+# Update participant data to remove these dyads
+complete_slider_data = attention_check_data |>
+  filter(!prolificId %in% incomplete_sliders$prolificId)
+# Align messages to remaining participants
+complete_slider_message_data = attention_check_message_data |>
+  filter(author %in% complete_slider_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(complete_slider_data$prolificId)
+n_distinct(complete_slider_message_data$author)
+
+
+
+# (5) Remove any participants who didn't finish the experiment
+final_participant_data = complete_slider_data |>
+  filter(currentState %in% c('experiment-complete', 'feedback-complete'))
+final_message_data = complete_slider_message_data |>
+  filter(author %in% final_participant_data$prolificId)
+# sanity check: same number of people in both?
+n_distinct(final_participant_data$prolificId)
+n_distinct(final_message_data$author)
+```
+
+
+## Summary of exclusions
+```{r}
+
+kable(
+  data.frame(
+    n_raw = n_distinct(participant_df_raw$prolificId),
+    n_matched = n_distinct(matched_participant_data$prolificId),
+    n_sent_messages = n_distinct(messaged_participant_data$prolificId),
+    n_finished_chat = n_distinct(chat_completion_data$prolificId),
+    n_passed_attn_check = n_distinct(attention_check_data$prolificId),
+    n_completed_sliders = n_distinct(complete_slider_data$prolificId),
+    n_finished = n_distinct(final_participant_data$prolificId),
+    n_dyads = n_distinct(final_participant_data$groupId)
+  ),
+  col.names = c("Raw", "Matched", "Sent Messages", "Finished Chat",
+                "Passed Attn Check", "Completed Sliders", "Finished Exp", "Dyads")
+)
+```
+
+```{r}
+# 500 participants were recruited (n_raw above this because of returns)
+num_recruited <- 500
+
+n_final <- length(unique(final_participant_data$prolificId))
+n_dyads <- length(unique(final_participant_data$groupId))
+
+num_excluded <- num_recruited - n_final
+
+paste("Number of participants fewer than from number recruited on Prolific:", num_excluded)
+```
+
+# Write data to csv
+
+## Participant slider data
+```{r}
+write.csv(final_participant_data,
+          file.path(save_dir, "question_prompting_full_participant_data_processed.csv"))
+
+```
+
+## Message data
+```{r}
+write.csv(final_message_data,
+          file.path(save_dir, "question_prompting_full_chat_messages_processed.csv"))
+
+```
+
+# demographics
+
+```{r}
+length(unique(final_participant_data$prolificId))
+length(unique(final_participant_data$groupId))
+```
+
+```{r}
+demographics_df <- final_participant_data %>%
+        select(prolificId, gender, race, age) %>%
+        distinct(prolificId, .keep_all = TRUE)
+
+table(demographics_df$gender)
+table(demographics_df$race)
+summary(demographics_df$age)
+```
+
+
+
