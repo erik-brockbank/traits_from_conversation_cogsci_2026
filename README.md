@@ -3,7 +3,7 @@
 Public repository for experiment code, data, and analyses featured in CogSci 2026 conference submission
 
 ## Overview
-[![Figure 1](https://raw.githubusercontent.com/erik-brockbank/traits_from_conversation_cogsci_2026/main/results/figure1_cogsci.png)](https://raw.githubusercontent.com/erik-brockbank/traits_from_conversation_cogsci_2026/main/results/figure1_cogsci.png)
+![Figure 1](results/figure1_cogsci.png)
 
 When meeting somebody for the first time, how do we figure
 out what they are like? In the current work, we investigate how
