@@ -1,0 +1,15 @@
+@import "tailwindcss";
+@plugin 'flowbite/plugin';
+
+
+html {
+    font-size: 1.25em;
+}
+
+.bounding-div {
+  margin: 25px;
+  text-align: center;
+}
+
+@source "../node_modules/flowbite-svelte/dist";
+@source "../node_modules/flowbite-svelte-icons/dist";
